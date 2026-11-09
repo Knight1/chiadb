@@ -1,0 +1,5 @@
+target
+.git
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

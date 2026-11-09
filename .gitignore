@@ -1,0 +1,8 @@
+# Generated, deployment-only binary graph payloads.
+# Git tracks the append-only source data, never these rebuilt assets.
+dist/data/*.cdb
+dist/data/*.index.json
+
+# Local collector state and Rust build output.
+collector/target/
+collector-state/

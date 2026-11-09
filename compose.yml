@@ -1,0 +1,45 @@
+services:
+  chia:
+    image: ghcr.io/chia-network/chia:latest
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      self_hostname: "0.0.0.0"
+    ports:
+      - "8444:8444"
+    volumes:
+      - chia-data:/root/.chia
+
+  collector:
+    build:
+      context: ./collector
+    restart: unless-stopped
+    depends_on:
+      chia:
+        condition: service_started
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      CHIA_RPC_URL: https://chia:8555
+      CHIA_RPC_CLIENT_CERT: /chia/mainnet/config/ssl/full_node/private_full_node.crt
+      CHIA_RPC_CLIENT_KEY: /chia/mainnet/config/ssl/full_node/private_full_node.key
+      CHIA_RPC_INSECURE_SKIP_VERIFY: "true"
+      CHIA_DB_PATH: /chia/mainnet/db/blockchain_v2_mainnet.sqlite
+      COLLECTOR_DB_PATH: /state/collector.sqlite
+      ARCHIVE_PATH: /output/archive/metrics.ndjson
+      POLL_SECONDS: "60"
+      MAX_BLOCKS_PER_POLL: "256"
+      RPC_CONCURRENCY: "4"
+      REORG_CHECK_DEPTH: "200"
+      BACKFILL_START_HEIGHT:
+      GIT_PUBLISH: ${GIT_PUBLISH:-false}
+      GIT_REMOTE: ${GIT_REMOTE:-origin}
+      GIT_BRANCH: ${GIT_BRANCH:-main}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-chia-db-collector}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-chia-db-collector@localhost}
+    volumes:
+      - chia-data:/chia:ro
+      - ./collector-state:/state
+      - ./:/output
+
+volumes:
+  chia-data:

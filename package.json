@@ -1,0 +1,12 @@
+{
+  "name": "chia-db-atlas",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local static prototype for a Chia full-node database dashboard",
+  "scripts": {
+    "build:data": "node scripts/build-cdb.mjs --input fixtures/demo.json --output dist/data/demo.cdb --index dist/data/demo.index.json",
+    "build:data:live": "node scripts/build-cdb.mjs --input archive/metrics.ndjson --output dist/data/metrics.cdb --index dist/data/metrics.index.json",
+    "check": "npm run build:data && node --check dist/app.js && python3 -m json.tool fixtures/demo.json > /dev/null",
+    "dev": "npm run build:data && python3 -m http.server 4173 --directory dist"
+  }
+}

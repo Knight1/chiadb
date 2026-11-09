@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071a39">
+  <meta name="description" content="A static dashboard for daily Chia full-node database size and chain activity.">
+  <title>Chia DB Atlas | local binary demo</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <div class="shell">
+    <header class="site-header">
+      <div class="header-intro">
+        <a class="brand" href="#" aria-label="Chia DB Atlas home">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span>chia<span class="brand-dot">.</span>db</span>
+        </a>
+        <p class="header-summary">A daily record of a synced Chia full node: its database footprint and the coin activity behind it.</p>
+      </div>
+      <div class="header-status" aria-label="Demo mode">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="mode-label">DEMO MODE</span>
+      </div>
+    </header>
+
+    <main class="dashboard">
+      <p class="load-error" id="load-error" role="alert" hidden></p>
+
+      <section class="panel footprint-panel" aria-labelledby="footprint-heading">
+        <div class="panel-heading">
+          <div>
+            <p class="section-kicker">01 / FOOTPRINT</p>
+            <h2 id="footprint-heading">Database size</h2>
+            <p class="section-copy">Exact-byte, end-of-day database-file snapshots.</p>
+          </div>
+          <div class="range-control" role="group" aria-label="Select database chart range">
+            <button class="range-button" type="button" data-range="7" aria-pressed="false">7D</button>
+            <button class="range-button is-active" type="button" data-range="30" aria-pressed="true">30D</button>
+            <button class="range-button" type="button" data-range="all" aria-pressed="false">ALL</button>
+          </div>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric">
+            <p>Latest footprint</p>
+            <strong id="latest-size">--</strong>
+            <span id="latest-date">Loading snapshots</span>
+          </article>
+          <article class="metric">
+            <p id="growth-label">30 day growth</p>
+            <strong id="growth-value">--</strong>
+            <span id="growth-detail">--</span>
+          </article>
+          <article class="metric">
+            <p>Average daily change</p>
+            <strong id="daily-growth">--</strong>
+            <span>Across selected window</span>
+          </article>
+          <article class="metric metric-accent">
+            <p>Latest checkpoint</p>
+            <strong id="latest-height">--</strong>
+            <span>Peak block height</span>
+          </article>
+        </div>
+
+        <div class="chart-frame chart-frame-large" id="footprint-frame">
+          <svg id="footprint-chart" class="chart" viewBox="0 0 1000 350" preserveAspectRatio="none" role="img" aria-label="Database size over time"></svg>
+          <div class="chart-tooltip" id="footprint-tooltip" aria-hidden="true"></div>
+        </div>
+
+        <div class="chart-caption">
+          <div class="legend">
+            <span><i class="legend-line" aria-hidden="true"></i> Database file</span>
+            <span><i class="legend-fill" aria-hidden="true"></i> Daily snapshot</span>
+          </div>
+          <p id="footprint-summary">Loading the local test dataset.</p>
+        </div>
+      </section>
+
+      <section class="lower-grid">
+        <section class="panel activity-panel" aria-labelledby="activity-heading">
+          <div class="panel-heading compact-heading">
+            <div>
+              <p class="section-kicker">02 / ACTIVITY</p>
+              <h2 id="activity-heading">Coin flow</h2>
+            </div>
+            <span class="chart-unit">coins / day</span>
+          </div>
+          <p class="section-copy">Additions rise above the baseline; removals fall below it. This is chain activity, not storage size.</p>
+
+          <div class="activity-stats">
+            <div>
+              <span>Additions</span>
+              <strong id="additions-total">--</strong>
+            </div>
+            <div>
+              <span>Removals</span>
+              <strong id="removals-total">--</strong>
+            </div>
+            <div>
+              <span>Net coins</span>
+              <strong id="net-total">--</strong>
+            </div>
+          </div>
+
+          <div class="chart-frame activity-frame" id="activity-frame">
+            <svg id="activity-chart" class="chart" viewBox="0 0 1000 270" preserveAspectRatio="none" role="img" aria-label="Daily additions and removals"></svg>
+            <div class="chart-tooltip" id="activity-tooltip" aria-hidden="true"></div>
+          </div>
+          <div class="activity-legend">
+            <span><i class="addition-swatch" aria-hidden="true"></i> additions</span>
+            <span><i class="removal-swatch" aria-hidden="true"></i> removals</span>
+          </div>
+        </section>
+
+        <aside class="panel notebook" aria-labelledby="notebook-heading">
+          <h2 id="notebook-heading">What this page measures</h2>
+          <ol>
+            <li>
+              <span>01</span>
+              <div>
+                <strong>Physical footprint</strong>
+                <p>File bytes are sampled after the node is fully synced. WAL bytes belong beside, not inside, the main-file measurement.</p>
+              </div>
+            </li>
+            <li>
+              <span>02</span>
+              <div>
+                <strong>Daily state transitions</strong>
+                <p>RPC additions and removals are counted per block, then grouped by the block's UTC date.</p>
+              </div>
+            </li>
+            <li>
+              <span>03</span>
+              <div>
+                <strong>Binary at delivery time</strong>
+                <p>Git keeps append-only source data. The compact CDB1 payload is generated only for the static deployment.</p>
+              </div>
+            </li>
+          </ol>
+          <div class="notebook-footer">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="dataset-meta">Reading local data</span>
+          </div>
+        </aside>
+      </section>
+
+      <section class="method-strip" aria-label="Metric relationship">
+        <div>
+          <span class="method-number">A</span>
+          <strong>Database bytes</strong>
+          <p>Measured from the node's database file at a daily checkpoint.</p>
+        </div>
+        <span class="method-arrow" aria-hidden="true">+</span>
+        <div>
+          <span class="method-number">B</span>
+          <strong>Additions and removals</strong>
+          <p>Observed from block-level RPC responses and rolled up by day.</p>
+        </div>
+        <span class="method-arrow" aria-hidden="true">=</span>
+        <div>
+          <span class="method-number">C</span>
+          <strong>Useful context</strong>
+          <p>Two related signals, deliberately not presented as a causal formula.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>CHIA DB ATLAS / LOCAL PROTOTYPE</span>
+      <span id="footer-updated">Test data</span>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
