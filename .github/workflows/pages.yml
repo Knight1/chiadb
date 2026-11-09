@@ -1,0 +1,94 @@
+name: CI and publish GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate site and collector
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Validate static site
+        run: npm run check
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test collector
+        run: cargo test --manifest-path collector/Cargo.toml --locked
+
+  build_pages:
+    name: Build Pages artifact
+    needs: validate
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build graph data
+        shell: bash
+        run: |
+          set -euo pipefail
+          record_count=0
+          if [[ -f archive/metrics.ndjson ]]; then
+            record_count="$(awk 'NF { count += 1 } END { print count + 0 }' archive/metrics.ndjson)"
+          fi
+          if [[ "$record_count" -ge 2 ]]; then
+            node scripts/build-cdb.mjs --input archive/metrics.ndjson --output dist/data/metrics.cdb --index dist/data/metrics.index.json
+          else
+            node scripts/build-cdb.mjs --input fixtures/demo.json --output dist/data/metrics.cdb --index dist/data/metrics.index.json
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy_pages:
+    name: Deploy GitHub Pages
+    needs: build_pages
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
