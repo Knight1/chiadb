@@ -5,14 +5,13 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       self_hostname: "0.0.0.0"
-    ports:
-      - "8444:8444"
     volumes:
       - chia-data:/root/.chia
 
   collector:
     build:
       context: ./collector
+    image: collector:latest
     restart: unless-stopped
     depends_on:
       chia:
