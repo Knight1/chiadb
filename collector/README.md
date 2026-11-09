@@ -19,6 +19,8 @@ The compose configuration starts an official Chia full-node image and this colle
 
 The Chia RPC uses mutual TLS. The default Compose setup deliberately enables `CHIA_RPC_INSECURE_SKIP_VERIFY=true` because the Chia container generates a self-signed server certificate and the RPC is private to the Compose network. The client certificate and key are still required. For a remote or shared network, mount a trusted CA at `CHIA_RPC_CA_CERT` and set `CHIA_RPC_INSECURE_SKIP_VERIFY=false`; do not expose port 8555.
 
+On a first Compose start, the Chia container can take time to create its TLS files and start its RPC service. The collector stays running when those files are absent, waits for `POLL_SECONDS` (60 seconds by default), and retries. Once the files exist, it keeps polling while the node syncs.
+
 The collector will not record a database-size sample until the node reports that it has synced. It updates the current UTC-day sample on each poll, then freezes that sample after UTC midnight. A missed day remains explicitly unobserved instead of being fabricated.
 
 ## Backfill coin activity from block 1

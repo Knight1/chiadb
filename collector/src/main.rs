@@ -40,13 +40,37 @@ async fn main() -> Result<()> {
     config.validate()?;
 
     let store = Store::open(&config.state_db_path)?;
-    let rpc = ChiaRpc::new(&config)?;
     let publisher = config
         .git_publish
         .then(|| GitPublisher::from_config(&config));
+    let mut rpc = None;
 
     loop {
-        let result = collect_once(&config, &rpc, &store, publisher.as_ref()).await;
+        if rpc.is_none() {
+            match ChiaRpc::new(&config) {
+                Ok(client) => {
+                    info!("Chia RPC TLS material is ready");
+                    rpc = Some(client);
+                }
+                Err(error) => {
+                    warn!(
+                        error = ?error,
+                        retry_seconds = config.poll_seconds,
+                        "Chia RPC TLS material is not ready; will retry"
+                    );
+                    tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
+                    continue;
+                }
+            }
+        }
+
+        let result = collect_once(
+            &config,
+            rpc.as_ref().expect("RPC client was initialized"),
+            &store,
+            publisher.as_ref(),
+        )
+        .await;
         if config.once {
             return result;
         }
