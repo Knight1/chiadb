@@ -29,6 +29,9 @@ pub struct Config {
     #[arg(long, env = "CHIA_RPC_INSECURE_SKIP_VERIFY", default_value_t = false)]
     pub rpc_insecure_skip_verify: bool,
 
+    #[arg(long, env = "CHIA_RPC_TIMEOUT_SECONDS", default_value_t = 300)]
+    pub rpc_timeout_seconds: u64,
+
     #[arg(
         long,
         env = "CHIA_DB_PATH",
@@ -101,6 +104,9 @@ impl Config {
         }
         if self.poll_seconds == 0 {
             bail!("POLL_SECONDS must be greater than zero");
+        }
+        if self.rpc_timeout_seconds == 0 {
+            bail!("CHIA_RPC_TIMEOUT_SECONDS must be greater than zero");
         }
         if self.max_blocks_per_poll == 0 {
             bail!("MAX_BLOCKS_PER_POLL must be greater than zero");

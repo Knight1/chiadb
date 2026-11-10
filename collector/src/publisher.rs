@@ -28,6 +28,16 @@ impl GitPublisher {
         }
     }
 
+    pub fn check_available(&self) -> Result<()> {
+        let output = Command::new("git").arg("--version").output().context(
+            "Git publishing requires the runtime-git image target or a local Git installation",
+        )?;
+        if !output.status.success() {
+            bail!("git --version failed with status {}", output.status);
+        }
+        Ok(())
+    }
+
     pub fn publish_archive(&self, archive_path: &Path, last_day: NaiveDate) -> Result<()> {
         let relative_archive = archive_path
             .strip_prefix(&self.worktree)
