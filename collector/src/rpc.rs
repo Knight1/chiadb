@@ -33,6 +33,28 @@ pub struct AdditionsAndRemovals {
     pub removals: u32,
 }
 
+pub fn validate_block_range(records: &[BlockRecord], start: u32, end: u32) -> Result<()> {
+    let expected_count = usize::try_from(end - start).context("block range exceeds usize")?;
+    if records.len() != expected_count {
+        bail!(
+            "get_block_records returned {} records for expected range {start}..{end}",
+            records.len()
+        );
+    }
+    for (offset, record) in records.iter().enumerate() {
+        let expected = start
+            .checked_add(u32::try_from(offset).context("record offset exceeds u32")?)
+            .context("block height overflow")?;
+        if record.height != expected {
+            bail!(
+                "get_block_records was not contiguous: expected height {expected}, got {}",
+                record.height
+            );
+        }
+    }
+    Ok(())
+}
+
 impl ChiaRpc {
     pub fn new(config: &Config) -> Result<Self> {
         let mut identity_pem = fs::read(&config.rpc_client_cert).with_context(|| {
@@ -83,6 +105,15 @@ impl ChiaRpc {
             synced: response.blockchain_state.sync.synced,
             peak_height: response.blockchain_state.peak.map(|peak| peak.height),
         })
+    }
+
+    pub async fn full_node_peer_count(&self) -> Result<usize> {
+        let value = self
+            .post_value("get_connections", json!({ "node_type": 1 }))
+            .await?;
+        let response: ConnectionsResponse =
+            serde_json::from_value(value).context("decode get_connections response")?;
+        Ok(response.connections.len())
     }
 
     pub async fn block_records(&self, start: u32, end: u32) -> Result<Vec<BlockRecord>> {
@@ -184,6 +215,12 @@ struct Peak {
 struct BlockRecordsResponse {
     #[serde(default)]
     block_records: Vec<BlockRecordPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectionsResponse {
+    #[serde(default)]
+    connections: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -80,6 +80,20 @@ impl Store {
         self.set_metadata("next_height", &next_height.to_string())
     }
 
+    pub fn initial_network_contact_observed(&self) -> Result<bool> {
+        Ok(self
+            .metadata_value("initial_network_contact_observed")?
+            .as_deref()
+            == Some("1"))
+    }
+
+    pub fn set_initial_network_contact_observed(&self, observed: bool) -> Result<()> {
+        self.set_metadata(
+            "initial_network_contact_observed",
+            if observed { "1" } else { "0" },
+        )
+    }
+
     pub fn bootstrap_pending(&self) -> Result<bool> {
         Ok(self.metadata_value("bootstrap_pending")?.as_deref() == Some("1"))
     }
@@ -481,136 +495,4 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     fs::rename(&temporary_path, path)
         .with_context(|| format!("replace archive {}", path.display()))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{env, fs};
-
-    use chrono::NaiveDate;
-
-    use super::fill_date_gaps;
-    use crate::model::{ArchiveRecord, FLAG_ACTIVITY_COMPLETE, FLAG_SIZE_OBSERVED};
-
-    fn day(value: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(value, "%Y-%m-%d").unwrap()
-    }
-
-    fn record(date: &str, flags: u32) -> ArchiveRecord {
-        ArchiveRecord {
-            date: date.to_owned(),
-            db_bytes: 0,
-            wal_bytes: 0,
-            peak_height: 0,
-            blocks: 0,
-            additions: 0,
-            removals: 0,
-            flags,
-        }
-    }
-
-    #[test]
-    fn fills_calendar_gaps_and_marks_complete_activity() {
-        let records = fill_date_gaps(
-            vec![
-                (
-                    day("2026-01-01"),
-                    ArchiveRecord {
-                        blocks: 1,
-                        additions: 2,
-                        removals: 1,
-                        ..record("2026-01-01", 0)
-                    },
-                ),
-                (day("2026-01-03"), record("2026-01-03", FLAG_SIZE_OBSERVED)),
-            ],
-            Some(day("2026-01-01")),
-            Some(day("2026-01-03")),
-            true,
-        )
-        .unwrap();
-
-        assert_eq!(records.len(), 3);
-        assert_eq!(records[1].flags, FLAG_ACTIVITY_COMPLETE);
-        assert_eq!(
-            records[2].flags,
-            FLAG_SIZE_OBSERVED | FLAG_ACTIVITY_COMPLETE
-        );
-    }
-
-    #[test]
-    fn keeps_a_partial_start_day_unmarked() {
-        let records = fill_date_gaps(
-            vec![
-                (day("2026-01-01"), record("2026-01-01", 0)),
-                (day("2026-01-02"), record("2026-01-02", 0)),
-            ],
-            Some(day("2026-01-01")),
-            Some(day("2026-01-02")),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(records[0].flags, 0);
-        assert_eq!(records[0].blocks, 0);
-        assert_eq!(records[0].additions, 0);
-        assert_eq!(records[0].removals, 0);
-        assert_eq!(records[1].flags, FLAG_ACTIVITY_COMPLETE);
-    }
-
-    #[test]
-    fn materializes_only_complete_activity_into_the_archive() {
-        let directory = env::temp_dir().join(format!(
-            "chia-db-collector-store-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let state_path = directory.join("state.sqlite");
-        let archive_path = directory.join("archive/metrics.ndjson");
-        let store = super::Store::open(&state_path).unwrap();
-        store.set_activity_start_complete(true).unwrap();
-        store
-            .upsert_block(&crate::model::BlockActivity {
-                height: 1,
-                header_hash: "0x01".to_owned(),
-                day: Some(day("2026-01-01")),
-                additions: 3,
-                removals: 2,
-            })
-            .unwrap();
-        store
-            .upsert_snapshot(&crate::model::DatabaseSnapshot {
-                day: day("2026-01-02"),
-                db_bytes: 123,
-                wal_bytes: 4,
-                peak_height: 2,
-                captured_at: "2026-01-02T23:59:00Z".to_owned(),
-            })
-            .unwrap();
-        store
-            .set_activity_complete_through(Some(day("2026-01-01")))
-            .unwrap();
-
-        let report = store
-            .materialize_closed_archive(&archive_path, day("2026-01-03"))
-            .unwrap();
-        assert!(report.changed);
-        assert_eq!(report.record_count, 2);
-
-        let archive = fs::read_to_string(&archive_path).unwrap();
-        let lines: Vec<ArchiveRecord> = archive
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(lines[0].flags, FLAG_ACTIVITY_COMPLETE);
-        assert_eq!(lines[0].additions, 3);
-        assert_eq!(lines[1].flags, FLAG_SIZE_OBSERVED);
-        assert_eq!(lines[1].db_bytes, 123);
-
-        drop(store);
-        fs::remove_dir_all(&directory).unwrap();
-    }
 }

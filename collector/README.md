@@ -1,6 +1,6 @@
 # Chia DB collector
 
-`chia-db-collector` is the long-running source of the graph data. It waits for a synced full node, records the physical SQLite database size, and obtains daily coin-transition counts through the full-node `get_additions_and_removals` RPC.
+`chia-db-collector` is the long-running source of the graph data. It records physical SQLite database size as soon as the file exists and begins coin-transition collection through `get_additions_and_removals` after the full node first contacts a full-node peer.
 
 It writes two different kinds of state:
 
@@ -21,11 +21,11 @@ The Chia RPC uses mutual TLS. The default Compose setup deliberately enables `CH
 
 On a first Compose start, the Chia container can take time to create its TLS files and start its RPC service. The collector stays running when those files are absent, waits for `POLL_SECONDS` (60 seconds by default), and retries. Once the files exist, it keeps polling while the node syncs.
 
-The collector will not record a database-size sample until the node reports that it has synced. It updates the current UTC-day sample on each poll, then freezes that sample after UTC midnight. A missed day remains explicitly unobserved instead of being fabricated.
+The collector records database and WAL size as soon as the SQLite file exists, including while the full node is syncing. Once that file exists and `get_connections` reports a full-node peer, it starts collecting block activity immediately, even during initial sync. It persists that first network-contact observation, so a later temporary peer disconnect does not stop collection from the node's local chain. It updates the current UTC-day size sample on each poll, then freezes that sample after UTC midnight. A missed day remains explicitly unobserved instead of being fabricated.
 
 ## Backfill coin activity from block 1
 
-The default starts activity collection at the current peak. To backfill every canonical block from height 0, start with an empty `collector-state/` directory and run:
+When the collector first sees an initially syncing node, it starts activity collection at block 0 automatically. If it first sees an already-synced node, the default starts at the current peak. To force a block-0 backfill in either case, start with an empty `collector-state/` directory and run:
 
     BACKFILL_START_HEIGHT=0 docker compose up --build
 
@@ -33,7 +33,7 @@ The environment variable is used only when the collector first creates its state
 
 While a historical backfill is incomplete, the collector keeps its intermediate data in local SQLite and does not rewrite or publish `archive/metrics.ndjson`. Once it reaches the tip, it writes the complete historical activity archive once. After that, it normally changes only after a UTC day is closed. A recent reorg can revise the small affected tail.
 
-An existing `blockchain_v2_mainnet.sqlite` file can only show its size at the time it is observed. It cannot reconstruct its physical size on earlier dates. A block-1 backfill therefore provides complete additions/removals history, while exact database-size history begins with the first observed synchronized day. The CDB1 flags distinguish these facts.
+An existing `blockchain_v2_mainnet.sqlite` file can only show its size at the time it is observed. It cannot reconstruct its physical size on earlier dates. A block-1 backfill therefore provides complete additions/removals history, while exact database-size history begins with the first observed file sample. The CDB1 flags distinguish these facts.
 
 ## Build and view the live graph data
 
@@ -66,4 +66,4 @@ When enabled, it stages only `archive/metrics.ndjson`, commits only when that fi
     cargo test --manifest-path collector/Cargo.toml
     docker compose run --rm collector --once
 
-The one-shot collector command still requires an already-synced Chia node and its generated certificates.
+The one-shot collector command records size when the database file exists. It needs generated TLS certificates, a local peak, and at least one observed full-node peer only when activity data is required; it does not wait for complete sync.

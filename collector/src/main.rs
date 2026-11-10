@@ -1,29 +1,22 @@
-mod config;
-mod model;
-mod publisher;
-mod rpc;
-mod store;
-
 use std::{
     fs,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use chia_db_collector::{
+    config::Config,
+    model::{BlockActivity, DatabaseSnapshot},
+    publisher::GitPublisher,
+    rpc::{BlockRecord, ChiaRpc, validate_block_range},
+    store::Store,
+};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-
-use crate::{
-    config::Config,
-    model::{BlockActivity, DatabaseSnapshot},
-    publisher::GitPublisher,
-    rpc::{BlockRecord, ChiaRpc},
-    store::Store,
-};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,24 +51,24 @@ async fn main() -> Result<()> {
                         retry_seconds = config.poll_seconds,
                         "Chia RPC TLS material is not ready; will retry"
                     );
-                    tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
-                    continue;
                 }
             }
         }
 
-        let result = collect_once(
-            &config,
-            rpc.as_ref().expect("RPC client was initialized"),
-            &store,
-            publisher.as_ref(),
-        )
-        .await;
+        let result = collect_once(&config, rpc.as_ref(), &store, publisher.as_ref()).await;
         if config.once {
             return result;
         }
         if let Err(error) = result {
-            error!(error = ?error, "collection cycle failed; will retry");
+            if is_connection_error(&error) {
+                info!(
+                    error = ?error,
+                    retry_seconds = config.poll_seconds,
+                    "Chia RPC endpoint is not ready; will retry"
+                );
+            } else {
+                error!(error = ?error, "collection cycle failed; will retry");
+            }
         }
         tokio::time::sleep(Duration::from_secs(config.poll_seconds)).await;
     }
@@ -83,42 +76,83 @@ async fn main() -> Result<()> {
 
 async fn collect_once(
     config: &Config,
-    rpc: &ChiaRpc,
+    rpc: Option<&ChiaRpc>,
     store: &Store,
     publisher: Option<&GitPublisher>,
 ) -> Result<()> {
-    let node = rpc.blockchain_state().await?;
-    if !node.synced {
-        info!("full node is not synced; skipping collection");
+    let now = Utc::now();
+    let today = now.date_naive();
+    let mut snapshot = capture_database_snapshot(config, store, now)?;
+
+    // Do not ask the node for activity until its SQLite database exists. This
+    // makes the database file the first durable observation and avoids
+    // creating an activity cursor before the node has initialized its store.
+    if snapshot.is_none() {
+        materialize_archive(config, store, publisher, today, false)?;
         return Ok(());
     }
-    let Some(peak_height) = node.peak_height else {
-        info!("full node has no peak yet; skipping collection");
+
+    let Some(rpc) = rpc else {
+        materialize_archive(config, store, publisher, today, false)?;
         return Ok(());
     };
 
-    let now = Utc::now();
-    let snapshot = DatabaseSnapshot {
-        day: now.date_naive(),
-        db_bytes: database_size(&config.db_path)?,
-        wal_bytes: sidecar_size(&config.db_path, "-wal")?,
-        peak_height,
-        captured_at: now.to_rfc3339(),
+    let node = match rpc.blockchain_state().await {
+        Ok(node) => node,
+        Err(error) => {
+            materialize_archive(config, store, publisher, today, false)?;
+            return Err(error);
+        }
     };
-    store.upsert_snapshot(&snapshot)?;
+
+    if let (Some(snapshot), Some(peak_height)) = (snapshot.as_mut(), node.peak_height) {
+        snapshot.peak_height = peak_height;
+        store.upsert_snapshot(snapshot)?;
+    }
+
+    let Some(peak_height) = node.peak_height else {
+        info!("full node has no peak yet; activity collection is waiting");
+        materialize_archive(config, store, publisher, today, false)?;
+        return Ok(());
+    };
+
+    let initial_network_contact = match initial_network_contact_observed(rpc, store).await {
+        Ok(observed) => observed,
+        Err(error) => {
+            materialize_archive(config, store, publisher, today, false)?;
+            return Err(error);
+        }
+    };
+    if !initial_network_contact {
+        info!("full node has not contacted a full-node peer; activity collection is waiting");
+        materialize_archive(config, store, publisher, today, false)?;
+        return Ok(());
+    }
 
     let stored_cursor = store.cursor()?;
+    let start_during_initial_sync = !node.synced;
     let mut cursor = stored_cursor.unwrap_or_else(|| {
-        config
-            .backfill_start_height
-            .unwrap_or_else(|| peak_height.saturating_add(1))
+        config.backfill_start_height.unwrap_or_else(|| {
+            if start_during_initial_sync {
+                0
+            } else {
+                peak_height.saturating_add(1)
+            }
+        })
     });
     if stored_cursor.is_none() {
         store.set_cursor(cursor)?;
-        store.set_bootstrap_pending(config.backfill_start_height.is_some())?;
+        store.set_bootstrap_pending(
+            config.backfill_start_height.is_some() || start_during_initial_sync,
+        )?;
         store.set_activity_start_complete(cursor == 0)?;
         if config.backfill_start_height.is_some() {
             info!(cursor, "initialized historical activity backfill");
+        } else if start_during_initial_sync {
+            info!(
+                cursor,
+                "initialized activity collection from block 0 during initial sync"
+            );
         } else {
             info!(cursor, "initialized live-only collection at current peak");
         }
@@ -133,7 +167,7 @@ async fn collect_once(
             .min(peak_height.saturating_add(1));
         let mut records = rpc.block_records(cursor, end).await?;
         records.sort_by_key(|record| record.height);
-        validate_range(&records, cursor, end)?;
+        validate_block_range(&records, cursor, end)?;
 
         let mut requested = Vec::new();
         for record in records {
@@ -163,9 +197,86 @@ async fn collect_once(
         store.set_cursor(cursor)?;
     }
 
-    let caught_up = cursor > peak_height;
-    update_activity_completion(store, now.date_naive(), caught_up)?;
+    let cursor_caught_up = cursor > peak_height;
+    // A partially synced node can temporarily catch up to its local tip. It
+    // must not mark historical days final or publish the archive until the
+    // node itself has reached the network tip.
+    let fully_caught_up = node.synced && cursor_caught_up;
+    update_activity_completion(store, today, fully_caught_up)?;
+    materialize_archive(config, store, publisher, today, fully_caught_up)?;
 
+    let (db_bytes, wal_bytes) = snapshot
+        .as_ref()
+        .map(|snapshot| (snapshot.db_bytes, snapshot.wal_bytes))
+        .unwrap_or((0, 0));
+    info!(
+        peak_height,
+        cursor,
+        processed,
+        cursor_caught_up,
+        node_synced = node.synced,
+        fully_caught_up,
+        size_sampled = snapshot.is_some(),
+        db_bytes,
+        wal_bytes,
+        "collection cycle complete"
+    );
+    Ok(())
+}
+
+async fn initial_network_contact_observed(rpc: &ChiaRpc, store: &Store) -> Result<bool> {
+    if store.initial_network_contact_observed()? {
+        return Ok(true);
+    }
+
+    let peer_count = rpc.full_node_peer_count().await?;
+    if peer_count == 0 {
+        return Ok(false);
+    }
+
+    store.set_initial_network_contact_observed(true)?;
+    info!(
+        peer_count,
+        "observed initial full-node peer contact; activity collection can begin"
+    );
+    Ok(true)
+}
+
+fn capture_database_snapshot(
+    config: &Config,
+    store: &Store,
+    now: DateTime<Utc>,
+) -> Result<Option<DatabaseSnapshot>> {
+    let db_bytes = match database_size(&config.db_path) {
+        Ok(db_bytes) => db_bytes,
+        Err(error) if is_not_found(&error) => {
+            info!(
+                database = %config.db_path.display(),
+                retry_seconds = config.poll_seconds,
+                "Chia database file is not ready; will retry"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let snapshot = DatabaseSnapshot {
+        day: now.date_naive(),
+        db_bytes,
+        wal_bytes: sidecar_size(&config.db_path, "-wal")?,
+        peak_height: 0,
+        captured_at: now.to_rfc3339(),
+    };
+    store.upsert_snapshot(&snapshot)?;
+    Ok(Some(snapshot))
+}
+
+fn materialize_archive(
+    config: &Config,
+    store: &Store,
+    publisher: Option<&GitPublisher>,
+    today: chrono::NaiveDate,
+    caught_up: bool,
+) -> Result<()> {
     if caught_up && store.bootstrap_pending()? {
         store.set_bootstrap_pending(false)?;
         info!("historical activity backfill is complete; materializing the archive");
@@ -175,7 +286,7 @@ async fn collect_once(
         info!("historical backfill is in progress; archive publishing is deferred");
         Default::default()
     } else {
-        store.materialize_closed_archive(&config.archive_path, now.date_naive())?
+        store.materialize_closed_archive(&config.archive_path, today)?
     };
     if archive.changed && archive.last_day.is_some() {
         store.set_publish_pending(true)?;
@@ -194,17 +305,23 @@ async fn collect_once(
         publisher.publish_archive(&config.archive_path, last_day)?;
         store.set_publish_pending(false)?;
     }
-
-    info!(
-        peak_height,
-        cursor,
-        processed,
-        caught_up,
-        db_bytes = snapshot.db_bytes,
-        wal_bytes = snapshot.wal_bytes,
-        "collection cycle complete"
-    );
     Ok(())
+}
+
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect)
+    })
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 fn update_activity_completion(
@@ -254,7 +371,7 @@ async fn reconcile_recent_chain(
     let end = highest_stored.saturating_add(1);
     let mut records = rpc.block_records(start, end).await?;
     records.sort_by_key(|record| record.height);
-    validate_range(&records, start, end)?;
+    validate_block_range(&records, start, end)?;
 
     for record in records {
         match store.block_hash(record.height)? {
@@ -296,28 +413,6 @@ async fn fetch_block_activity(rpc: &ChiaRpc, record: BlockRecord) -> Result<Bloc
     })
 }
 
-fn validate_range(records: &[BlockRecord], start: u32, end: u32) -> Result<()> {
-    let expected_count = usize::try_from(end - start).context("block range exceeds usize")?;
-    if records.len() != expected_count {
-        bail!(
-            "get_block_records returned {} records for expected range {start}..{end}",
-            records.len()
-        );
-    }
-    for (offset, record) in records.iter().enumerate() {
-        let expected = start
-            .checked_add(u32::try_from(offset).context("record offset exceeds u32")?)
-            .context("block height overflow")?;
-        if record.height != expected {
-            bail!(
-                "get_block_records was not contiguous: expected height {expected}, got {}",
-                record.height
-            );
-        }
-    }
-    Ok(())
-}
-
 fn database_size(path: &Path) -> Result<u64> {
     fs::metadata(path)
         .with_context(|| format!("stat Chia database {}", path.display()))
@@ -341,36 +436,4 @@ fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> Result<PathBuf> {
         .and_then(|name| name.to_str())
         .context("database path has no UTF-8 file name")?;
     Ok(database_path.with_file_name(format!("{file_name}{suffix}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BlockRecord, validate_range};
-
-    #[test]
-    fn validates_contiguous_block_records() {
-        let records = vec![
-            BlockRecord {
-                height: 10,
-                header_hash: "0x10".to_owned(),
-                timestamp: None,
-            },
-            BlockRecord {
-                height: 11,
-                header_hash: "0x11".to_owned(),
-                timestamp: None,
-            },
-        ];
-        assert!(validate_range(&records, 10, 12).is_ok());
-    }
-
-    #[test]
-    fn rejects_missing_block_records() {
-        let records = vec![BlockRecord {
-            height: 10,
-            header_hash: "0x10".to_owned(),
-            timestamp: None,
-        }];
-        assert!(validate_range(&records, 10, 12).is_err());
-    }
 }
