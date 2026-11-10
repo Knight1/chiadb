@@ -33,6 +33,9 @@ jobs:
       - name: Test collector
         run: cargo test --manifest-path collector/Cargo.toml --locked
 
+      - name: Test collector container permissions
+        run: bash collector/tests/container-smoke.sh
+
   build_pages:
     name: Build Pages artifact
     needs: validate
